@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terrain to STL</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <h1>Terrain → STL</h1>
+    <p class="hint">Draw a rectangle on the map, tune the settings, then generate a 3D-printable model.</p>
+
+    <section>
+      <h2>Area</h2>
+      <p class="hint">Click anywhere on the map to set the top-left (NW) corner. The tool generates a grid of Rows × Columns square tiles, each Square-side km, extending south and east from that point.</p>
+      <div class="bbox-grid">
+        <label>North (click point) <input id="bN" type="text" disabled></label>
+        <label>West (click point) <input id="bW" type="text" disabled></label>
+      </div>
+      <label class="number-row">
+        Square side (km)
+        <input id="squareSideKm" type="number" min="0.2" max="80" step="0.1" value="7">
+      </label>
+      <div class="bbox-grid">
+        <label>Rows (south) <input id="gridRows" type="number" min="1" max="12" step="1" value="1"></label>
+        <label>Columns (east) <input id="gridCols" type="number" min="1" max="12" step="1" value="1"></label>
+      </div>
+      <p class="hint" id="bboxHint">No area selected yet.</p>
+    </section>
+
+    <section id="waterSection">
+      <h2>Water</h2>
+      <label class="checkbox-row">
+        <input type="checkbox" id="flattenLakes">
+        Flatten lakes
+      </label>
+      <p class="hint">When checked, lake/river polygons are pulled from OpenStreetMap and every point inside a lake is set to one flat elevation, instead of following noisy raw terrain data.</p>
+      <label class="checkbox-row">
+        <input type="checkbox" id="debugRaiseLakes">
+        Debug: raise flattened lakes +100m
+      </label>
+      <p class="hint">Exaggerates flattened lakes 100m above their real elevation so their outline is unmistakable in the preview — use this to visually check the detected shape against the real lake before turning it off.</p>
+    </section>
+
+    <section>
+      <h2>Model</h2>
+      <label class="slider-row">
+        Grid resolution <span id="gridResVal">120</span>
+        <input id="gridRes" type="range" min="50" max="440" step="10" value="120">
+      </label>
+      <label class="slider-row">
+        Vertical exaggeration <span id="exagVal">1x</span>
+        <input id="exag" type="range" min="0.5" max="4" step="0.1" value="1">
+      </label>
+      <label class="number-row">
+        Tile size (mm per square)
+        <input id="modelSize" type="number" min="30" max="300" value="250">
+      </label>
+      <label class="number-row">
+        Base thickness (mm, minimum)
+        <input id="baseThickness" type="number" min="1" max="15" value="3">
+      </label>
+      <p class="hint">With a multi-tile grid, this is the base thickness of the tile containing the lowest point in the whole grid. Every other tile gets a thicker base so all tiles' bottoms sit on the same physical plane when assembled — a tile that's entirely up a mountain gets a proportionally thicker base.</p>
+      <label class="checkbox-row">
+        <input type="checkbox" id="topDownView">
+        Top-down preview
+      </label>
+      <p class="hint">Views the model from nearly overhead instead of the default angle — useful for checking whether flat areas (lakes, plateaus) actually look flat, since the default angled view can hide small flat patches next to tall peaks.</p>
+    </section>
+
+    <section>
+      <h2>Elevation source</h2>
+      <label class="checkbox-row">
+        <input type="radio" name="elevSource" id="srcUsgs" value="usgs3dep" checked>
+        USGS 3DEP (US only, ~10m, hydro-flattened)
+      </label>
+      <label class="checkbox-row">
+        <input type="radio" name="elevSource" id="srcAws" value="aws">
+        AWS Terrain Tiles (global, raw)
+      </label>
+      <label class="checkbox-row">
+        <input type="radio" name="elevSource" id="srcMapbox" value="mapbox">
+        Mapbox Terrain-RGB (needs token)
+      </label>
+      <div id="mapboxTokenRow" class="number-row" style="display:none;">
+        Mapbox token
+        <input id="mapboxToken" type="text" placeholder="pk.xxxxx">
+      </div>
+      <p class="hint" id="elevSourceHint">USGS 3DEP covers the continental US and ships already hydro-flattened at the source — real lakes and rivers are already flat before the "Flatten lakes" step even runs. Outside the US, switch to AWS or Mapbox.</p>
+    </section>
+
+    <button id="generateBtn" disabled>Generate model</button>
+    <button id="downloadBtn" disabled>Download STL</button>
+    <p class="hint" id="tileCountHint"></p>
+
+    <section>
+      <h2>Log</h2>
+      <pre id="log"></pre>
+    </section>
+  </aside>
+
+  <main id="main">
+    <div id="map"></div>
+    <div id="preview"></div>
+  </main>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/geotiff@2.1.3/dist-browser/geotiff.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
