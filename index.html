@@ -72,6 +72,37 @@
     </section>
 
     <section>
+      <h2>Color by elevation</h2>
+      <label class="checkbox-row">
+        <input type="checkbox" id="colorByElevation" checked>
+        Color preview by elevation
+      </label>
+      <p class="hint">Preview-only: colors each point of the 3D preview by which elevation band it falls in. STL files have no standard way to store color, so exported files are still plain (uncolored) geometry regardless of this setting.</p>
+      <div class="color-band-row">
+        <input type="color" id="colorBand1" value="#1a4d2e">
+        <span>up to</span>
+        <input type="number" id="colorBreak1" value="1900">
+        <span>m</span>
+      </div>
+      <div class="color-band-row">
+        <input type="color" id="colorBand2" value="#7cb342">
+        <span>up to</span>
+        <input type="number" id="colorBreak2" value="2700">
+        <span>m</span>
+      </div>
+      <div class="color-band-row">
+        <input type="color" id="colorBand3" value="#9e9e9e">
+        <span>up to</span>
+        <input type="number" id="colorBreak3" value="3400">
+        <span>m</span>
+      </div>
+      <div class="color-band-row">
+        <input type="color" id="colorBand4" value="#ffffff">
+        <span>above</span>
+      </div>
+    </section>
+
+    <section>
       <h2>Elevation source</h2>
       <label class="checkbox-row">
         <input type="radio" name="elevSource" id="srcUsgs" value="usgs3dep" checked>

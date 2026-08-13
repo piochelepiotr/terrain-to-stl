@@ -108,6 +108,31 @@ input[type="range"] {
 
 .checkbox-row input { width: auto; }
 
+.color-band-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.color-band-row input[type="color"] {
+  width: 32px;
+  height: 28px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #0f1216;
+  flex: 0 0 auto;
+}
+
+.color-band-row input[type="number"] {
+  width: 80px;
+  margin-top: 0;
+  flex: 0 0 auto;
+}
+
 details {
   margin: 18px 0;
   padding-top: 14px;

@@ -454,17 +454,26 @@ function findLakeIndex(lon, lat, polys) {
   return -1;
 }
 
+// Bands: array of { color: THREE.Color, max: number }, sorted ascending, last max=Infinity.
+function colorForElevation(elev, bands) {
+  for (const b of bands) if (elev <= b.max) return b.color;
+  return bands[bands.length - 1].color;
+}
+
 // ---------- geometry: heightmap grid -> solid mesh ----------
 // opts: tileSizeM (real-world meters per side, same for every tile in a grid),
 // modelWidthMM (printed mm per side), exaggeration, baseThicknessMM (minimum, for
 // whichever tile touches minElev), minElev (elevation reference - pass a grid-wide
-// minimum so multiple tiles share one base plane and stay assemblable).
+// minimum so multiple tiles share one base plane and stay assemblable), colorBands
+// (optional - when set, builds a per-vertex color attribute for the live preview;
+// this has no effect on the exported STL, which has no standard color support).
 function buildSolidGeometry(elevGrid, gridRes, opts) {
   const scaleXY = opts.modelWidthMM / opts.tileSizeM;
   const widthMM = opts.modelWidthMM;
   const heightMM = opts.modelWidthMM;
   const zScale = scaleXY * opts.exaggeration;
   const minElev = opts.minElev;
+  const colorBands = opts.colorBands || null;
 
   const xAt = (gx) => (gx / (gridRes - 1)) * widthMM - widthMM / 2;
   const yAt = (gy) => ((gridRes - 1 - gy) / (gridRes - 1)) * heightMM - heightMM / 2;
@@ -472,12 +481,17 @@ function buildSolidGeometry(elevGrid, gridRes, opts) {
   const zBase = -opts.baseThicknessMM;
 
   const positions = [];
+  const colors = colorBands ? [] : null;
   const indices = [];
   const idxTop = (gx, gy) => gy * gridRes + gx;
 
   for (let gy = 0; gy < gridRes; gy++) {
     for (let gx = 0; gx < gridRes; gx++) {
       positions.push(xAt(gx), yAt(gy), zTopAt(gx, gy));
+      if (colors) {
+        const c = colorForElevation(elevGrid[gy * gridRes + gx], colorBands);
+        colors.push(c.r, c.g, c.b);
+      }
     }
   }
   for (let gy = 0; gy < gridRes - 1; gy++) {
@@ -487,9 +501,10 @@ function buildSolidGeometry(elevGrid, gridRes, opts) {
     }
   }
 
-  const baseIndex = (n) => {
+  const baseIndex = (n, color) => {
     const i = positions.length / 3;
     positions.push(n.x, n.y, zBase);
+    if (colors) colors.push(color.r, color.g, color.b);
     return i;
   };
 
@@ -503,8 +518,13 @@ function buildSolidGeometry(elevGrid, gridRes, opts) {
   for (let gx = gridRes - 1; gx > 0; gx--) perimeterTop.push(idxTop(gx, gridRes - 1)); // south: east->west
   for (let gy = gridRes - 1; gy > 0; gy--) perimeterTop.push(idxTop(0, gy)); // west: south->north
 
+  // Base-ring vertices inherit their corresponding top vertex's color, so walls blend
+  // smoothly down to the base instead of all being one flat color.
   const perimeterBase = perimeterTop.map((top) =>
-    baseIndex({ x: positions[top * 3], y: positions[top * 3 + 1] })
+    baseIndex(
+      { x: positions[top * 3], y: positions[top * 3 + 1] },
+      colors ? { r: colors[top * 3], g: colors[top * 3 + 1], b: colors[top * 3 + 2] } : null
+    )
   );
 
   // side walls: one quad per perimeter edge, connecting top ring to base ring
@@ -522,6 +542,7 @@ function buildSolidGeometry(elevGrid, gridRes, opts) {
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  if (colors) geometry.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
   geometry.setIndex(indices);
   geometry.computeVertexNormals();
   return geometry;
@@ -654,6 +675,15 @@ async function generateModel() {
   const topDownView = document.getElementById("topDownView").checked;
   const mapboxToken = document.getElementById("mapboxToken").value.trim();
   const elevSource = document.querySelector('input[name="elevSource"]:checked').value;
+  const colorByElevation = document.getElementById("colorByElevation").checked;
+  const colorBands = colorByElevation
+    ? [
+        { color: new THREE.Color(document.getElementById("colorBand1").value), max: parseFloat(document.getElementById("colorBreak1").value) },
+        { color: new THREE.Color(document.getElementById("colorBand2").value), max: parseFloat(document.getElementById("colorBreak2").value) },
+        { color: new THREE.Color(document.getElementById("colorBand3").value), max: parseFloat(document.getElementById("colorBreak3").value) },
+        { color: new THREE.Color(document.getElementById("colorBand4").value), max: Infinity },
+      ]
+    : null;
 
   const tileSizeM = currentGrid.sizeKm * 1000;
   const cells = currentGrid.cells;
@@ -737,7 +767,14 @@ async function generateModel() {
       scene.remove(currentMeshGroup);
       currentMeshGroup.traverse((obj) => obj.geometry && obj.geometry.dispose());
     }
-    const material = new THREE.MeshStandardMaterial({ color: 0x4f8cff, metalness: 0.1, roughness: 0.8, flatShading: false, side: THREE.DoubleSide });
+    const material = new THREE.MeshStandardMaterial({
+      color: colorByElevation ? 0xffffff : 0x4f8cff,
+      vertexColors: colorByElevation,
+      metalness: 0.1,
+      roughness: 0.8,
+      flatShading: false,
+      side: THREE.DoubleSide,
+    });
     const group = new THREE.Group();
 
     const MAX_PREVIEW_TILES = 36; // beyond this, live-rendering every tile would hang or crash the tab
@@ -753,6 +790,7 @@ async function generateModel() {
         exaggeration,
         baseThicknessMM,
         minElev: globalMin,
+        colorBands,
       });
       if (i < MAX_PREVIEW_TILES) {
         const mesh = new THREE.Mesh(cell.geometry, material);
