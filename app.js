@@ -248,23 +248,35 @@ function decodeMapboxTerrainRGB(r, g, b) {
   return -10000 + (r * 256 * 256 + g * 256 + b) * 0.1;
 }
 
-async function fetchTile(z, x, y, mapboxToken) {
-  const url = mapboxToken
-    ? `https://api.mapbox.com/v4/mapbox.terrain-rgb/${z}/${x}/${y}.pngraw?access_token=${encodeURIComponent(mapboxToken)}`
-    : `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
-  const img = await loadImage(url);
-  const canvas = document.createElement("canvas");
-  canvas.width = TILE_SIZE;
-  canvas.height = TILE_SIZE;
-  const ctx = canvas.getContext("2d");
-  ctx.drawImage(img, 0, 0);
-  const data = ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE).data;
-  const elev = new Float32Array(TILE_SIZE * TILE_SIZE);
-  const decode = mapboxToken ? decodeMapboxTerrainRGB : decodeTerrarium;
-  for (let i = 0; i < TILE_SIZE * TILE_SIZE; i++) {
-    elev[i] = decode(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
-  }
-  return elev;
+// Shared across every cell in a grid generation run: neighboring tiles very often
+// reuse the same underlying source tile (PNG tile or USGS GeoTIFF), so caching by
+// key here avoids redundant re-fetches instead of every cell fetching from scratch.
+const pngTileCache = new Map(); // key: "aws|mb_z_x_y" -> Promise<Float32Array>
+
+function fetchTile(z, x, y, mapboxToken) {
+  const cacheKey = `${mapboxToken ? "mb" : "aws"}_${z}_${x}_${y}`;
+  if (pngTileCache.has(cacheKey)) return pngTileCache.get(cacheKey);
+  const promise = (async () => {
+    const url = mapboxToken
+      ? `https://api.mapbox.com/v4/mapbox.terrain-rgb/${z}/${x}/${y}.pngraw?access_token=${encodeURIComponent(mapboxToken)}`
+      : `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${x}/${y}.png`;
+    const img = await loadImage(url);
+    const canvas = document.createElement("canvas");
+    canvas.width = TILE_SIZE;
+    canvas.height = TILE_SIZE;
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(img, 0, 0);
+    const data = ctx.getImageData(0, 0, TILE_SIZE, TILE_SIZE).data;
+    const elev = new Float32Array(TILE_SIZE * TILE_SIZE);
+    const decode = mapboxToken ? decodeMapboxTerrainRGB : decodeTerrarium;
+    for (let i = 0; i < TILE_SIZE * TILE_SIZE; i++) {
+      elev[i] = decode(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
+    }
+    return elev;
+  })();
+  promise.catch(() => pngTileCache.delete(cacheKey)); // don't cache a failure
+  pngTileCache.set(cacheKey, promise);
+  return promise;
 }
 
 async function fetchElevationContext(bounds, mapboxToken) {
@@ -279,7 +291,6 @@ async function fetchElevationContext(bounds, mapboxToken) {
       );
     }
   }
-  log(`Fetching ${jobs.length} elevation tile(s) at zoom ${z}...`);
   await Promise.all(jobs);
   return { z, tiles };
 }
@@ -311,6 +322,20 @@ function usgs3depTileUrl(latBand, lonBand) {
   return { name, url: `https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/${name}/USGS_13_${name}.tif` };
 }
 
+// Each GeoTIFF handle is cheap (lazy remote source; readRasters only fetches the
+// byte range it needs), but opening+parsing one still costs a round trip - worth
+// sharing across every grid cell that happens to fall in the same 1-degree tile.
+const usgsTiffCache = new Map(); // key: tile name -> Promise<GeoTIFF>
+
+function getUsgsTiff(name, url) {
+  if (!usgsTiffCache.has(name)) {
+    const promise = window.GeoTIFF.fromUrl(url);
+    promise.catch(() => usgsTiffCache.delete(name));
+    usgsTiffCache.set(name, promise);
+  }
+  return usgsTiffCache.get(name);
+}
+
 async function buildUsgs3depSampler(bounds, gridRes) {
   const west = bounds.getWest(), east = bounds.getEast(), south = bounds.getSouth(), north = bounds.getNorth();
   const latBandMin = Math.floor(south), latBandMax = Math.floor(north - 1e-9);
@@ -331,7 +356,7 @@ async function buildUsgs3depSampler(bounds, gridRes) {
       const outW = Math.max(2, Math.round(gridRes * ((ovE - ovW) / (east - west))));
       const outH = Math.max(2, Math.round(gridRes * ((ovN - ovS) / (north - south))));
       jobs.push(
-        window.GeoTIFF.fromUrl(url)
+        getUsgsTiff(name, url)
           .then((tiff) => tiff.readRasters({ bbox: [ovW, ovS, ovE, ovN], width: outW, height: outH, resampleMethod: "bilinear" }))
           .then((rasters) => {
             tileRasters.push({ data: rasters[0], width: rasters.width, height: rasters.height, west: ovW, east: ovE, south: ovS, north: ovN });
@@ -340,7 +365,6 @@ async function buildUsgs3depSampler(bounds, gridRes) {
       );
     }
   }
-  log(`Fetching ${jobs.length} USGS 3DEP tile(s)...`);
   await Promise.all(jobs);
 
   if (tileRasters.length === 0) {
@@ -372,7 +396,7 @@ async function buildElevationSampler(bounds, source, mapboxToken, gridRes) {
 // ---------- water bodies (OpenStreetMap Overpass) ----------
 async function fetchWaterPolygons(bounds) {
   const s = bounds.getSouth(), w = bounds.getWest(), n = bounds.getNorth(), e = bounds.getEast();
-  const query = `[out:json][timeout:25];(way["natural"="water"](${s},${w},${n},${e});relation["natural"="water"]["type"="multipolygon"](${s},${w},${n},${e}););out geom;`;
+  const query = `[out:json][timeout:120];(way["natural"="water"](${s},${w},${n},${e});relation["natural"="water"]["type"="multipolygon"](${s},${w},${n},${e}););out geom;`;
   const resp = await fetch("https://overpass-api.de/api/interpreter", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -635,59 +659,78 @@ async function generateModel() {
   const cells = currentGrid.cells;
 
   try {
-    let globalMin = Infinity;
-
-    for (let ci = 0; ci < cells.length; ci++) {
-      const cell = cells[ci];
-      const label = cells.length > 1 ? `Tile ${ci + 1}/${cells.length} (row ${cell.row + 1}, col ${cell.col + 1})` : "Tile";
-      const bounds = cell.bounds;
-      const west = bounds.getWest(), east = bounds.getEast(), north = bounds.getNorth(), south = bounds.getSouth();
-
-      const sample = await buildElevationSampler(bounds, elevSource, mapboxToken || null, gridRes);
-
-      log(`${label}: sampling elevation grid...`);
-      const elevGrid = new Float32Array(gridRes * gridRes);
-      for (let gy = 0; gy < gridRes; gy++) {
-        const lat = north - ((north - south) * gy) / (gridRes - 1);
-        for (let gx = 0; gx < gridRes; gx++) {
-          const lon = west + ((east - west) * gx) / (gridRes - 1);
-          elevGrid[gy * gridRes + gx] = sample(lon, lat);
-        }
+    // Fetch water outlines ONCE for the whole grid instead of once per tile - at
+    // up to 10,000 tiles, one-query-per-tile would get Overpass to rate-limit or
+    // ban us. A single big query is slower per-call but astronomically fewer calls.
+    let polys = [];
+    if (flattenLakes) {
+      log(cells.length > 1 ? "Fetching lake/water outlines for the whole grid area (one query covers every tile)..." : "Fetching lake/water outlines from OpenStreetMap...");
+      try {
+        polys = await fetchWaterPolygons(currentGrid.overallBounds);
+        log(`Found ${polys.length} water polygon(s) covering the whole grid.`);
+      } catch (err) {
+        log(`Warning: could not fetch water outlines (${err.message}). Continuing without lake flattening.`);
       }
-
-      if (flattenLakes) {
-        log(`${label}: fetching lake/water outlines from OpenStreetMap...`);
-        const polys = await fetchWaterPolygons(bounds);
-        const lakeIdOfCell = new Int32Array(gridRes * gridRes).fill(-1);
-        for (let gy = 0; gy < gridRes; gy++) {
-          const lat = north - ((north - south) * gy) / (gridRes - 1);
-          for (let gx = 0; gx < gridRes; gx++) {
-            const lon = west + ((east - west) * gx) / (gridRes - 1);
-            lakeIdOfCell[gy * gridRes + gx] = findLakeIndex(lon, lat, polys);
-          }
-        }
-        const minPerLake = new Map();
-        for (let i = 0; i < lakeIdOfCell.length; i++) {
-          const id = lakeIdOfCell[i];
-          if (id < 0) continue;
-          const v = elevGrid[i];
-          if (!minPerLake.has(id) || v < minPerLake.get(id)) minPerLake.set(id, v);
-        }
-        const debugOffset = debugRaiseLakes ? 100 : 0;
-        let flattenedCells = 0;
-        for (let i = 0; i < lakeIdOfCell.length; i++) {
-          const id = lakeIdOfCell[i];
-          if (id < 0) continue;
-          elevGrid[i] = minPerLake.get(id) + debugOffset;
-          flattenedCells++;
-        }
-        log(`${label}: found ${polys.length} water polygon(s), flattened ${flattenedCells} of ${elevGrid.length} cells.`);
-      }
-
-      for (const v of elevGrid) if (v < globalMin) globalMin = v;
-      cell.elevGrid = elevGrid;
     }
 
+    let globalMin = Infinity;
+    let totalFlattenedCells = 0;
+    const debugOffset = debugRaiseLakes ? 100 : 0;
+    const CONCURRENCY = 5; // elevation sources handle this fine now that Overpass is no longer called per-tile
+    let completed = 0;
+
+    for (let batchStart = 0; batchStart < cells.length; batchStart += CONCURRENCY) {
+      const batch = cells.slice(batchStart, batchStart + CONCURRENCY);
+      await Promise.all(
+        batch.map(async (cell) => {
+          const bounds = cell.bounds;
+          const west = bounds.getWest(), east = bounds.getEast(), north = bounds.getNorth(), south = bounds.getSouth();
+          const sample = await buildElevationSampler(bounds, elevSource, mapboxToken || null, gridRes);
+
+          const elevGrid = new Float32Array(gridRes * gridRes);
+          for (let gy = 0; gy < gridRes; gy++) {
+            const lat = north - ((north - south) * gy) / (gridRes - 1);
+            for (let gx = 0; gx < gridRes; gx++) {
+              const lon = west + ((east - west) * gx) / (gridRes - 1);
+              elevGrid[gy * gridRes + gx] = sample(lon, lat);
+            }
+          }
+
+          if (flattenLakes && polys.length > 0) {
+            const lakeIdOfCell = new Int32Array(gridRes * gridRes).fill(-1);
+            for (let gy = 0; gy < gridRes; gy++) {
+              const lat = north - ((north - south) * gy) / (gridRes - 1);
+              for (let gx = 0; gx < gridRes; gx++) {
+                const lon = west + ((east - west) * gx) / (gridRes - 1);
+                lakeIdOfCell[gy * gridRes + gx] = findLakeIndex(lon, lat, polys);
+              }
+            }
+            const minPerLake = new Map();
+            for (let i = 0; i < lakeIdOfCell.length; i++) {
+              const id = lakeIdOfCell[i];
+              if (id < 0) continue;
+              const v = elevGrid[i];
+              if (!minPerLake.has(id) || v < minPerLake.get(id)) minPerLake.set(id, v);
+            }
+            for (let i = 0; i < lakeIdOfCell.length; i++) {
+              const id = lakeIdOfCell[i];
+              if (id < 0) continue;
+              elevGrid[i] = minPerLake.get(id) + debugOffset;
+              totalFlattenedCells++;
+            }
+          }
+
+          for (const v of elevGrid) if (v < globalMin) globalMin = v;
+          cell.elevGrid = elevGrid;
+          completed++;
+        })
+      );
+      if (cells.length > 1) log(`Sampled ${completed}/${cells.length} tile(s)...`);
+    }
+
+    if (flattenLakes && polys.length > 0) {
+      log(`Flattened ${totalFlattenedCells} grid cells across all tiles.`);
+    }
     log(`Global minimum elevation across all tiles: ${globalMin.toFixed(1)}m. Building solid mesh(es)...`);
 
     if (currentMeshGroup) {
@@ -697,7 +740,13 @@ async function generateModel() {
     const material = new THREE.MeshStandardMaterial({ color: 0x4f8cff, metalness: 0.1, roughness: 0.8, flatShading: false, side: THREE.DoubleSide });
     const group = new THREE.Group();
 
-    for (const cell of cells) {
+    const MAX_PREVIEW_TILES = 36; // beyond this, live-rendering every tile would hang or crash the tab
+    if (cells.length > MAX_PREVIEW_TILES) {
+      log(`Preview limited to the first ${MAX_PREVIEW_TILES} tiles for performance — all ${cells.length} tiles are still built and included in the download.`);
+    }
+
+    for (let i = 0; i < cells.length; i++) {
+      const cell = cells[i];
       cell.geometry = buildSolidGeometry(cell.elevGrid, gridRes, {
         tileSizeM,
         modelWidthMM,
@@ -705,9 +754,11 @@ async function generateModel() {
         baseThicknessMM,
         minElev: globalMin,
       });
-      const mesh = new THREE.Mesh(cell.geometry, material);
-      mesh.position.set(cell.col * modelWidthMM, -cell.row * modelWidthMM, 0);
-      group.add(mesh);
+      if (i < MAX_PREVIEW_TILES) {
+        const mesh = new THREE.Mesh(cell.geometry, material);
+        mesh.position.set(cell.col * modelWidthMM, -cell.row * modelWidthMM, 0);
+        group.add(mesh);
+      }
     }
 
     scene.add(group);
