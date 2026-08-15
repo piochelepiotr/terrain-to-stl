@@ -276,10 +276,10 @@
         "nil"
     ],
     "filament_settings_id": [
-        "Bambu PLA Basic @BBL X1C",
-        "Bambu PLA Basic @BBL X1C",
-        "Bambu PLA Basic @BBL X1C",
-        "Bambu PLA Basic @BBL X1C"
+        "Bambu PLA Basic @BBL P2S",
+        "Bambu PLA Basic @BBL P2S",
+        "Bambu PLA Basic @BBL P2S",
+        "Bambu PLA Basic @BBL P2S"
     ],
     "filament_soluble": [
         "0",
@@ -553,24 +553,24 @@
         "0.02"
     ],
     "prime_tower_brim_width": "3",
-    "prime_tower_width": "35",
+    "prime_tower_width": "20",
     "prime_volume": "45",
     "print_compatible_printers": [
-        "Bambu Lab N1 0.4 nozzle"
+        "Bambu Lab P2S 0.4 nozzle"
     ],
     "print_flow_ratio": "1",
     "print_host": "",
     "print_sequence": "by layer",
-    "print_settings_id": "0.20mm Standard @BBL X1C",
+    "print_settings_id": "0.20mm Standard @BBL P2S",
     "printable_area": [
         "0x0",
-        "180x0",
-        "180x180",
-        "0x180"
+        "256x0",
+        "256x256",
+        "0x256"
     ],
-    "printable_height": "180",
-    "printer_model": "Bambu Lab X1 Carbon",
-    "printer_settings_id": "Bambu Lab X1 Carbon 0.4 nozzle",
+    "printable_height": "256",
+    "printer_model": "Bambu Lab P2S",
+    "printer_settings_id": "Bambu Lab P2S 0.4 nozzle",
     "printer_technology": "FFF",
     "printer_variant": "0.4",
     "printhost_authorization_type": "key",
@@ -754,10 +754,7 @@
     "tree_support_brim_width": "0",
     "tree_support_wall_count": "1",
     "upward_compatible_machine": [
-        "Bambu Lab P1S 0.4 nozzle",
-        "Bambu Lab P1P 0.4 nozzle",
-        "Bambu Lab X1 0.4 nozzle",
-        "Bambu Lab X1 Carbon 0.4 nozzle"
+        "Bambu Lab P2S 0.4 nozzle"
     ],
     "use_relative_e_distances": "1",
     "version": "01.07.03.04",
@@ -785,16 +782,16 @@
     "wipe_tower_no_sparse_layers": "0",
     "wipe_tower_rotation_angle": "0",
     "wipe_tower_x": [
-        "155",
-        "155",
-        "155",
-        "155"
+        "__WIPE_X__",
+        "__WIPE_X__",
+        "__WIPE_X__",
+        "__WIPE_X__"
     ],
     "wipe_tower_y": [
-        "220",
-        "220",
-        "220",
-        "220"
+        "__WIPE_Y__",
+        "__WIPE_Y__",
+        "__WIPE_Y__",
+        "__WIPE_Y__"
     ],
     "xy_contour_compensation": "0",
     "xy_hole_compensation": "0",

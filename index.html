@@ -57,8 +57,9 @@
       </label>
       <label class="number-row">
         Tile size (mm per square)
-        <input id="modelSize" type="number" min="30" max="300" value="250">
+        <input id="modelSize" type="number" min="30" max="300" value="170">
       </label>
+      <p class="hint" id="tileSizeHint">3MF export needs room beside the model for both the AMS exclusion zone at the front-left of the plate and the multi-color prime/wipe tower (Bambu Studio always requires one when a print uses more than one filament, so it can't just be turned off). Tiles up to ~176mm leave enough margin for both on a 256x256mm bed (P1S/P2S/X1/X1C); above that, Bambu Studio may warn about exclusion-zone or prime-tower collisions since there's no clear space left to place them.</p>
       <label class="number-row">
         Base thickness (mm, minimum)
         <input id="baseThickness" type="number" min="1" max="15" value="3">

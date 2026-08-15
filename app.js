@@ -198,6 +198,16 @@ new ResizeObserver(() => {
 
 new ResizeObserver(() => map.invalidateSize()).observe(document.getElementById("map"));
 
+// Fallback for the (rare) case a browser doesn't fire ResizeObserver on a window-level
+// resize/maximize of a position:fixed ancestor - recompute everything directly off the
+// window's own dimensions instead of relying on the observed elements alone.
+window.addEventListener("resize", () => {
+  map.invalidateSize();
+  camera.aspect = previewEl.clientWidth / previewEl.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(previewEl.clientWidth, previewEl.clientHeight);
+});
+
 // ---------- tile math ----------
 function lon2worldX(lon, z) {
   return ((lon + 180) / 360) * Math.pow(2, z) * TILE_SIZE;
@@ -761,7 +771,46 @@ function exportResults(cells) {
 // objects since they're intentionally coincident in X/Y. Wrapping them as one object's
 // volumes is the structurally correct fix, not just a warning suppression.
 const WRAPPER_OBJECT_ID = 100;
-function build3mfModelXml(objects) {
+const BED_SIZE_MM = 256;
+// Bambu's AMS-equipped printers (P1S/P2S/X1/X1C/H2 series) all carve an exclusion zone
+// out of the front-left of the bed for the AMS feed/lidar hardware. The exact shape varies
+// by model - the largest known one (P2S) is a 28x28mm corner block plus an 8mm-wide strip
+// running the full left edge - so clearing x >= 30mm is enough to stay outside all of them
+// without needing to special-case per-printer geometry.
+const BED_EXCLUDE_MARGIN_MM = 30;
+const BED_EDGE_MARGIN_MM = 2;
+function bedPlacementXY(widthMM) {
+  const maxX = BED_SIZE_MM - BED_EDGE_MARGIN_MM - widthMM / 2;
+  const x = Math.min(BED_EXCLUDE_MARGIN_MM + widthMM / 2, maxX);
+  const y = BED_SIZE_MM / 2;
+  return { x, y };
+}
+function bedPlacementTransform(widthMM) {
+  const { x, y } = bedPlacementXY(widthMM);
+  return `${x} ${y} 0`;
+}
+
+// Bambu's prime/wipe tower needs its own clear patch of bed, separate from the model and
+// the AMS exclusion zone. BambuStudio's own normalize_fdm_2() (PrintConfig.cpp) force
+// re-enables the tower whenever more than one filament is used with by-layer printing
+// (our case) - enable_prime_tower:"0" gets silently overridden back to on when the file
+// loads, so positioning it correctly, not disabling it, is the only real fix. We compute a
+// corridor to the right of the model, running its full bed-Y extent, sized to comfortably
+// fit the tower regardless of its purge-volume-driven depth. Falls back to a fixed
+// near-origin corner (still clear of the model, though possibly tight against the exclusion
+// zone) if the model is wide enough to leave no real margin - a genuine bed-space
+// constraint no placement choice can fully solve.
+const PRIME_TOWER_CORRIDOR_MM = 50;
+function wipeTowerXY(widthMM) {
+  const { x } = bedPlacementXY(widthMM);
+  const objXMax = x + widthMM / 2;
+  const corridor = BED_SIZE_MM - objXMax;
+  if (corridor >= PRIME_TOWER_CORRIDOR_MM) {
+    return { x: objXMax + corridor / 2 - PRIME_TOWER_CORRIDOR_MM / 4, y: BED_EDGE_MARGIN_MM + 10 };
+  }
+  return { x: BED_EXCLUDE_MARGIN_MM, y: BED_EDGE_MARGIN_MM + 10 };
+}
+function build3mfModelXml(objects, widthMM) {
   let resources = "";
   let components = "";
   for (const obj of objects) {
@@ -785,10 +834,11 @@ function build3mfModelXml(objects) {
     ` <metadata name="Application">BambuStudio-01.09.00.50</metadata>\n` +
     ` <metadata name="BambuStudio:3mfVersion">1</metadata>\n` +
     ` <resources>\n${resources} </resources>\n` +
-    // Our geometry is centered at local (0,0); translate to roughly the center of a
-    // typical 256x256mm bed (X1C/P1S) instead of the world origin, so it lands on the
-    // plate instead of triggering an "objects laid over the boundary" warning.
-    ` <build>\n  <item objectid="${WRAPPER_OBJECT_ID}" transform="1 0 0 0 1 0 0 0 1 128 128 0" printable="1"/>\n </build>\n` +
+    // Our geometry is centered at local (0,0); translate onto a 256x256mm bed, shifted off
+    // dead-center just enough to clear the AMS exclusion zone at the front-left of the plate
+    // (see bedPlacementTransform) instead of triggering a "too close to exclusion area" or
+    // "objects laid over the boundary" warning.
+    ` <build>\n  <item objectid="${WRAPPER_OBJECT_ID}" transform="1 0 0 0 1 0 0 0 1 ${bedPlacementTransform(widthMM)}" printable="1"/>\n </build>\n` +
     `</model>\n`
   );
 }
@@ -822,12 +872,16 @@ function fetchProjectSettingsTemplate() {
   return projectSettingsTemplatePromise;
 }
 
-function fillProjectSettingsColors(templateText, colorBands) {
+function fillProjectSettingsColors(templateText, colorBands, widthMM) {
   let out = templateText;
   for (let i = 0; i < 4; i++) {
     const hex = "#" + colorBands[i].color.getHexString().toUpperCase();
-    out = out.replace(`__COLOR${i + 1}__`, hex);
+    out = out.replaceAll(`__COLOR${i + 1}__`, hex);
   }
+  // wipe_tower_x/y each appear once per filament slot (4x) in the template - replaceAll
+  // matters here, a plain .replace would leave 3 of the 4 as invalid unquoted JSON tokens.
+  const { x, y } = wipeTowerXY(widthMM);
+  out = out.replaceAll("__WIPE_X__", String(x)).replaceAll("__WIPE_Y__", String(y));
   return out;
 }
 
@@ -866,11 +920,11 @@ async function build3mfBytes(cell, gridRes, bandOpts, heightsMm, colorBands) {
   if (objects.length === 0) throw new Error("No geometry generated for any color band.");
 
   const encoder = new TextEncoder();
-  const projectSettingsJson = fillProjectSettingsColors(await fetchProjectSettingsTemplate(), colorBands);
+  const projectSettingsJson = fillProjectSettingsColors(await fetchProjectSettingsTemplate(), colorBands, bandOpts.modelWidthMM);
   const files = [
     { name: "[Content_Types].xml", data: encoder.encode(MF_CONTENT_TYPES_XML) },
     { name: "_rels/.rels", data: encoder.encode(MF_ROOT_RELS_XML) },
-    { name: "3D/3dmodel.model", data: encoder.encode(build3mfModelXml(objects)) },
+    { name: "3D/3dmodel.model", data: encoder.encode(build3mfModelXml(objects, bandOpts.modelWidthMM)) },
     { name: "Metadata/model_settings.config", data: encoder.encode(buildModelSettingsXml(objects)) },
     { name: "Metadata/project_settings.config", data: encoder.encode(projectSettingsJson) },
   ];
