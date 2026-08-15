@@ -695,6 +695,51 @@ function build3mfModelXml(geometry) {
   );
 }
 
+// Minimal per-object metadata block matching what BambuStudio itself writes (object
+// name + default extruder). Missing entirely is fine for geometry-only imports, but
+// including it keeps the file structurally identical to a real BambuStudio project.
+function buildModelSettingsXml() {
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<config>\n` +
+    ` <object id="1">\n` +
+    `  <metadata key="name" value="Terrain"/>\n` +
+    `  <metadata key="extruder" value="1"/>\n` +
+    ` </object>\n` +
+    `</config>\n`
+  );
+}
+
+// A minimal project (geometry + layer_config_ranges only, no project_settings.config)
+// loads fine in BambuStudio for the 3D view, but the object-list sidebar tries to show
+// a "settings" panel for each height range and crashes with a null-pointer dereference
+// in their own GUI_ObjectList.cpp (dynamic_cast<TabPrintModel*> result used unchecked) -
+// this only happens when the app's per-object settings tab never got initialized, which
+// requires a full print/filament/printer config to be present, exactly like every real
+// BambuStudio-saved project has. So we ship one: a real project_settings.config pulled
+// from BambuStudio's own bundled sample project (resources/calib/.../pa_pattern.3mf),
+// with filament count widened to 4 slots and our band colors substituted in - everything
+// else is left exactly as their own file, rather than guessed key-by-key.
+let projectSettingsTemplatePromise = null;
+function fetchProjectSettingsTemplate() {
+  if (!projectSettingsTemplatePromise) {
+    projectSettingsTemplatePromise = fetch("bambu_project_settings_template.json").then((r) => {
+      if (!r.ok) throw new Error(`Failed to load bambu_project_settings_template.json: HTTP ${r.status}`);
+      return r.text();
+    });
+  }
+  return projectSettingsTemplatePromise;
+}
+
+function fillProjectSettingsColors(templateText, colorBands) {
+  let out = templateText;
+  for (let i = 0; i < 4; i++) {
+    const hex = "#" + colorBands[i].color.getHexString().toUpperCase();
+    out = out.replace(`__COLOR${i + 1}__`, hex);
+  }
+  return out;
+}
+
 const MF_CONTENT_TYPES_XML =
   `<?xml version="1.0" encoding="UTF-8"?>\n` +
   `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n` +
@@ -729,24 +774,28 @@ function computeBandHeightsMm(colorBands, globalMin, baseThicknessMM, zScale) {
   return [z0, z1, z2, z3, zTop];
 }
 
-function build3mfBytes(geometry, heightsMm) {
+async function build3mfBytes(geometry, heightsMm, colorBands) {
   const encoder = new TextEncoder();
+  const projectSettingsJson = fillProjectSettingsColors(await fetchProjectSettingsTemplate(), colorBands);
   const files = [
     { name: "[Content_Types].xml", data: encoder.encode(MF_CONTENT_TYPES_XML) },
     { name: "_rels/.rels", data: encoder.encode(MF_ROOT_RELS_XML) },
     { name: "3D/3dmodel.model", data: encoder.encode(build3mfModelXml(geometry)) },
     { name: "Metadata/layer_config_ranges.xml", data: encoder.encode(buildLayerConfigRangesXml(heightsMm)) },
+    { name: "Metadata/model_settings.config", data: encoder.encode(buildModelSettingsXml()) },
+    { name: "Metadata/project_settings.config", data: encoder.encode(projectSettingsJson) },
   ];
   return buildZip(files);
 }
 
-function export3MF(cells, genParams) {
+async function export3MF(cells, genParams) {
   const heightsMm = computeBandHeightsMm(genParams.colorBands, genParams.globalMin, genParams.baseThicknessMM, genParams.zScale);
-  const files = cells.map((cell) => {
-    const data = build3mfBytes(cell.geometry, heightsMm);
+  const files = [];
+  for (const cell of cells) {
+    const data = await build3mfBytes(cell.geometry, heightsMm, genParams.colorBands);
     const name = cells.length === 1 ? "terrain.3mf" : `tile_row${cell.row + 1}_col${cell.col + 1}.3mf`;
-    return { name, data };
-  });
+    files.push({ name, data });
+  }
 
   if (files.length === 1) {
     downloadBlob(new Blob([files[0].data], { type: "model/3mf" }), files[0].name);
@@ -936,7 +985,7 @@ for (const radio of document.querySelectorAll('input[name="exportFormat"]')) {
 }
 
 generateBtn.addEventListener("click", generateModel);
-document.getElementById("downloadBtn").addEventListener("click", () => {
+document.getElementById("downloadBtn").addEventListener("click", async () => {
   if (!lastGeneratedCells) return;
   const format = document.querySelector('input[name="exportFormat"]:checked').value;
   if (format === "3mf") {
@@ -944,7 +993,12 @@ document.getElementById("downloadBtn").addEventListener("click", () => {
       log('3MF export needs "Color preview by elevation" turned on before generating — check that box and click Generate again.');
       return;
     }
-    export3MF(lastGeneratedCells, lastGeneratedParams);
+    try {
+      await export3MF(lastGeneratedCells, lastGeneratedParams);
+    } catch (err) {
+      console.error(err);
+      log(`3MF export failed: ${err.message}`);
+    }
   } else {
     exportResults(lastGeneratedCells);
   }
