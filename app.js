@@ -551,6 +551,84 @@ function buildSolidGeometry(elevGrid, gridRes, opts) {
   return geometry;
 }
 
+// Builds a solid representing just the portion of the terrain within [lowerMm, upperMm]
+// as its own separate watertight object. Used for 3MF multi-color export: each color band
+// becomes a separate object with a plain per-object extruder assignment instead of a height
+// range, since BambuStudio's height-range-modifier UI crashes on load (see build3mfBytes).
+// A cell is included if any of its 4 corners' raw height exceeds lowerMm - bands overlap
+// slightly at their boundary rather than leaving a gap, which is safer for printing than a
+// sliver of missing material. includeAlways=true (the lowest band) always includes every
+// cell, so band 0 always covers the full footprint down to the base plate.
+function buildBandGeometry(elevGrid, gridRes, opts, lowerMm, upperMm, includeAlways) {
+  const scaleXY = opts.modelWidthMM / opts.tileSizeM;
+  const widthMM = opts.modelWidthMM;
+  const heightMM = opts.modelWidthMM;
+  const zScale = scaleXY * opts.exaggeration;
+  const minElev = opts.minElev;
+  const baseMm = opts.baseThicknessMM;
+
+  const xAt = (gx) => (gx / (gridRes - 1)) * widthMM - widthMM / 2;
+  const yAt = (gy) => ((gridRes - 1 - gy) / (gridRes - 1)) * heightMM - heightMM / 2;
+  const rawTopMm = (gx, gy) => baseMm + (elevGrid[gy * gridRes + gx] - minElev) * zScale;
+  const clampedTopMm = (gx, gy) => Math.min(Math.max(rawTopMm(gx, gy), lowerMm), upperMm);
+
+  const cellIncluded = (gx, gy) => {
+    if (gx < 0 || gy < 0 || gx > gridRes - 2 || gy > gridRes - 2) return false;
+    if (includeAlways) return true;
+    const e00 = rawTopMm(gx, gy), e10 = rawTopMm(gx + 1, gy), e01 = rawTopMm(gx, gy + 1), e11 = rawTopMm(gx + 1, gy + 1);
+    return Math.max(e00, e10, e01, e11) > lowerMm;
+  };
+
+  const positions = [];
+  const indices = [];
+  const topVertexId = new Int32Array(gridRes * gridRes).fill(-1);
+  const bottomVertexId = new Int32Array(gridRes * gridRes).fill(-1);
+  const key = (gx, gy) => gy * gridRes + gx;
+
+  function getTop(gx, gy) {
+    const k = key(gx, gy);
+    if (topVertexId[k] === -1) {
+      topVertexId[k] = positions.length / 3;
+      positions.push(xAt(gx), yAt(gy), clampedTopMm(gx, gy));
+    }
+    return topVertexId[k];
+  }
+  function getBottom(gx, gy) {
+    const k = key(gx, gy);
+    if (bottomVertexId[k] === -1) {
+      bottomVertexId[k] = positions.length / 3;
+      positions.push(xAt(gx), yAt(gy), lowerMm);
+    }
+    return bottomVertexId[k];
+  }
+
+  let any = false;
+  for (let gy = 0; gy < gridRes - 1; gy++) {
+    for (let gx = 0; gx < gridRes - 1; gx++) {
+      if (!cellIncluded(gx, gy)) continue;
+      any = true;
+      const a = getTop(gx, gy), b = getTop(gx + 1, gy), c = getTop(gx, gy + 1), d = getTop(gx + 1, gy + 1);
+      indices.push(a, b, d, a, d, c);
+
+      const ba = getBottom(gx, gy), bb = getBottom(gx + 1, gy), bc = getBottom(gx, gy + 1), bd = getBottom(gx + 1, gy + 1);
+      indices.push(ba, bd, bb, ba, bc, bd);
+
+      if (!cellIncluded(gx - 1, gy)) indices.push(a, c, bc, a, bc, ba); // west wall
+      if (!cellIncluded(gx + 1, gy)) indices.push(b, bb, bd, b, bd, d); // east wall
+      if (!cellIncluded(gx, gy - 1)) indices.push(a, ba, bb, a, bb, b); // north wall
+      if (!cellIncluded(gx, gy + 1)) indices.push(c, d, bd, c, bd, bc); // south wall
+    }
+  }
+
+  if (!any) return null;
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex(indices);
+  geometry.computeVertexNormals();
+  return geometry;
+}
+
 // ---------- minimal ZIP writer (STORE method, no compression - STL data barely compresses anyway) ----------
 const CRC_TABLE = (() => {
   const table = new Uint32Array(256);
@@ -661,65 +739,78 @@ function exportResults(cells) {
 }
 
 // ---------- 3MF export (Bambu Studio project format: bakes elevation color bands in
-// as height-range filament changes, so AMS multi-color printing needs no manual setup).
+// as separate objects, one per band, each with a plain per-object extruder assignment.
+//
+// This does NOT use BambuStudio's height-range-modifier mechanism (layer_config_ranges),
+// even though that's the more "native" feature for height-based color. Extensively
+// verified (real crash reports + a from-scratch Node reimplementation + a byte-for-byte
+// surgical edit of BambuStudio's own bundled sample project, preserving every real file
+// it normally ships with) that opening ANY object with layer_config_ranges + an extruder
+// option crashes BambuStudio's object-list sidebar (GUI_ObjectList.cpp, add_settings_item:
+// an unchecked dynamic_cast<TabPrintModel*> result gets dereferenced) on both the user's
+// originally-installed version and the current latest release. Plain per-object extruder
+// assignment (this approach) goes through a different, unaffected code path.
+//
 // Format reverse-engineered from BambuStudio's own open-source 3MF reader/writer
 // (src/libslic3r/Format/bbs_3mf.cpp) rather than guessed, since it's undocumented.
-function build3mfModelXml(geometry) {
-  const pos = geometry.attributes.position.array;
-  const idx = geometry.index.array;
-  const vLines = [];
-  for (let i = 0; i < pos.length; i += 3) {
-    vLines.push(`     <vertex x="${pos[i]}" y="${pos[i + 1]}" z="${pos[i + 2]}"/>`);
+// Each color band becomes its own <object> (a "volume" in BambuStudio's terms), but all
+// of them are wrapped as <component>s of ONE outer object with ONE <build> item - matching
+// how BambuStudio itself represents a single multi-material part (see the "<part>" pattern
+// in its own model_settings.config). Earlier we made each band a separate top-level build
+// item instead; BambuStudio loaded and printed fine, but flagged them as overlapping plate
+// objects since they're intentionally coincident in X/Y. Wrapping them as one object's
+// volumes is the structurally correct fix, not just a warning suppression.
+const WRAPPER_OBJECT_ID = 100;
+function build3mfModelXml(objects) {
+  let resources = "";
+  let components = "";
+  for (const obj of objects) {
+    const pos = obj.geometry.attributes.position.array;
+    const idx = obj.geometry.index.array;
+    const vLines = [];
+    for (let i = 0; i < pos.length; i += 3) vLines.push(`     <vertex x="${pos[i]}" y="${pos[i + 1]}" z="${pos[i + 2]}"/>`);
+    const tLines = [];
+    for (let i = 0; i < idx.length; i += 3) tLines.push(`     <triangle v1="${idx[i]}" v2="${idx[i + 1]}" v3="${idx[i + 2]}"/>`);
+    resources +=
+      `  <object id="${obj.id}" type="model">\n` +
+      `   <mesh>\n    <vertices>\n${vLines.join("\n")}\n    </vertices>\n` +
+      `    <triangles>\n${tLines.join("\n")}\n    </triangles>\n   </mesh>\n` +
+      `  </object>\n`;
+    components += `    <component objectid="${obj.id}" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>\n`;
   }
-  const tLines = [];
-  for (let i = 0; i < idx.length; i += 3) {
-    tLines.push(`     <triangle v1="${idx[i]}" v2="${idx[i + 1]}" v3="${idx[i + 2]}"/>`);
-  }
+  resources += `  <object id="${WRAPPER_OBJECT_ID}" type="model">\n   <components>\n${components}   </components>\n  </object>\n`;
   return (
     `<?xml version="1.0" encoding="UTF-8"?>\n` +
     `<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">\n` +
     ` <metadata name="Application">BambuStudio-01.09.00.50</metadata>\n` +
     ` <metadata name="BambuStudio:3mfVersion">1</metadata>\n` +
-    ` <resources>\n` +
-    `  <object id="1" type="model">\n` +
-    `   <mesh>\n` +
-    `    <vertices>\n${vLines.join("\n")}\n    </vertices>\n` +
-    `    <triangles>\n${tLines.join("\n")}\n    </triangles>\n` +
-    `   </mesh>\n` +
-    `  </object>\n` +
-    ` </resources>\n` +
-    ` <build>\n` +
-    `  <item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>\n` +
-    ` </build>\n` +
+    ` <resources>\n${resources} </resources>\n` +
+    // Our geometry is centered at local (0,0); translate to roughly the center of a
+    // typical 256x256mm bed (X1C/P1S) instead of the world origin, so it lands on the
+    // plate instead of triggering an "objects laid over the boundary" warning.
+    ` <build>\n  <item objectid="${WRAPPER_OBJECT_ID}" transform="1 0 0 0 1 0 0 0 1 128 128 0" printable="1"/>\n </build>\n` +
     `</model>\n`
   );
 }
 
-// Minimal per-object metadata block matching what BambuStudio itself writes (object
-// name + default extruder). Missing entirely is fine for geometry-only imports, but
-// including it keeps the file structurally identical to a real BambuStudio project.
-function buildModelSettingsXml() {
+// Per-volume extruder assignment via <part> entries under the one wrapper object, matching
+// exactly how BambuStudio's own multi-material exports structure this.
+function buildModelSettingsXml(objects) {
+  let parts = "";
+  for (const obj of objects) {
+    parts +=
+      `  <part id="${obj.id}" subtype="normal_part">\n` +
+      `   <metadata key="name" value="Terrain band ${obj.id}"/>\n` +
+      `   <metadata key="matrix" value="1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 1"/>\n` +
+      `   <metadata key="extruder" value="${obj.id}"/>\n` +
+      `  </part>\n`;
+  }
   return (
-    `<?xml version="1.0" encoding="UTF-8"?>\n` +
-    `<config>\n` +
-    ` <object id="1">\n` +
-    `  <metadata key="name" value="Terrain"/>\n` +
-    `  <metadata key="extruder" value="1"/>\n` +
-    ` </object>\n` +
-    `</config>\n`
+    `<?xml version="1.0" encoding="UTF-8"?>\n<config>\n` +
+    ` <object id="${WRAPPER_OBJECT_ID}">\n  <metadata key="name" value="Terrain"/>\n${parts} </object>\n</config>\n`
   );
 }
 
-// A minimal project (geometry + layer_config_ranges only, no project_settings.config)
-// loads fine in BambuStudio for the 3D view, but the object-list sidebar tries to show
-// a "settings" panel for each height range and crashes with a null-pointer dereference
-// in their own GUI_ObjectList.cpp (dynamic_cast<TabPrintModel*> result used unchecked) -
-// this only happens when the app's per-object settings tab never got initialized, which
-// requires a full print/filament/printer config to be present, exactly like every real
-// BambuStudio-saved project has. So we ship one: a real project_settings.config pulled
-// from BambuStudio's own bundled sample project (resources/calib/.../pa_pattern.3mf),
-// with filament count widened to 4 slots and our band colors substituted in - everything
-// else is left exactly as their own file, rather than guessed key-by-key.
 let projectSettingsTemplatePromise = null;
 function fetchProjectSettingsTemplate() {
   if (!projectSettingsTemplatePromise) {
@@ -753,17 +844,9 @@ const MF_ROOT_RELS_XML =
   ` <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n` +
   `</Relationships>`;
 
-// heightsMm: [z0,z1,z2,z3,zTop] boundaries -> 4 ranges, each assigned AMS/extruder slot 1-4.
-function buildLayerConfigRangesXml(heightsMm) {
-  let ranges = "";
-  for (let i = 0; i < 4; i++) {
-    ranges += `<range min_z="${heightsMm[i]}" max_z="${heightsMm[i + 1]}">\n<option opt_key="extruder">${i + 1}</option>\n</range>\n`;
-  }
-  return `<?xml version="1.0"?>\n<objects>\n<object id="1">\n${ranges}</object>\n</objects>\n`;
-}
-
 // Converts our elevation color-band cutoffs (meters) into printed-mm height boundaries,
-// clamped to stay monotonically increasing regardless of input order.
+// clamped to stay monotonically increasing regardless of input order. Returns [z0,z1,z2,z3,zTop]
+// -> 4 bands [z0,z1], [z1,z2], [z2,z3], [z3,zTop].
 function computeBandHeightsMm(colorBands, globalMin, baseThicknessMM, zScale) {
   const toMm = (elevM) => baseThicknessMM + (elevM - globalMin) * zScale;
   const z0 = 0;
@@ -774,15 +857,21 @@ function computeBandHeightsMm(colorBands, globalMin, baseThicknessMM, zScale) {
   return [z0, z1, z2, z3, zTop];
 }
 
-async function build3mfBytes(geometry, heightsMm, colorBands) {
+async function build3mfBytes(cell, gridRes, bandOpts, heightsMm, colorBands) {
+  const objects = [];
+  for (let i = 0; i < 4; i++) {
+    const geometry = buildBandGeometry(cell.elevGrid, gridRes, bandOpts, heightsMm[i], heightsMm[i + 1], i === 0);
+    if (geometry) objects.push({ id: i + 1, geometry });
+  }
+  if (objects.length === 0) throw new Error("No geometry generated for any color band.");
+
   const encoder = new TextEncoder();
   const projectSettingsJson = fillProjectSettingsColors(await fetchProjectSettingsTemplate(), colorBands);
   const files = [
     { name: "[Content_Types].xml", data: encoder.encode(MF_CONTENT_TYPES_XML) },
     { name: "_rels/.rels", data: encoder.encode(MF_ROOT_RELS_XML) },
-    { name: "3D/3dmodel.model", data: encoder.encode(build3mfModelXml(geometry)) },
-    { name: "Metadata/layer_config_ranges.xml", data: encoder.encode(buildLayerConfigRangesXml(heightsMm)) },
-    { name: "Metadata/model_settings.config", data: encoder.encode(buildModelSettingsXml()) },
+    { name: "3D/3dmodel.model", data: encoder.encode(build3mfModelXml(objects)) },
+    { name: "Metadata/model_settings.config", data: encoder.encode(buildModelSettingsXml(objects)) },
     { name: "Metadata/project_settings.config", data: encoder.encode(projectSettingsJson) },
   ];
   return buildZip(files);
@@ -790,9 +879,16 @@ async function build3mfBytes(geometry, heightsMm, colorBands) {
 
 async function export3MF(cells, genParams) {
   const heightsMm = computeBandHeightsMm(genParams.colorBands, genParams.globalMin, genParams.baseThicknessMM, genParams.zScale);
+  const bandOpts = {
+    modelWidthMM: genParams.modelWidthMM,
+    tileSizeM: genParams.tileSizeM,
+    exaggeration: genParams.exaggeration,
+    minElev: genParams.globalMin,
+    baseThicknessMM: genParams.baseThicknessMM,
+  };
   const files = [];
   for (const cell of cells) {
-    const data = await build3mfBytes(cell.geometry, heightsMm, genParams.colorBands);
+    const data = await build3mfBytes(cell, genParams.gridRes, bandOpts, heightsMm, genParams.colorBands);
     const name = cells.length === 1 ? "terrain.3mf" : `tile_row${cell.row + 1}_col${cell.col + 1}.3mf`;
     files.push({ name, data });
   }
@@ -955,6 +1051,10 @@ async function generateModel() {
       colorBands,
       globalMin,
       baseThicknessMM,
+      modelWidthMM,
+      tileSizeM,
+      exaggeration,
+      gridRes,
       zScale: (modelWidthMM / tileSizeM) * exaggeration,
     };
 
