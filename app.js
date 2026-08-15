@@ -477,8 +477,11 @@ function buildSolidGeometry(elevGrid, gridRes, opts) {
 
   const xAt = (gx) => (gx / (gridRes - 1)) * widthMM - widthMM / 2;
   const yAt = (gy) => ((gridRes - 1 - gy) / (gridRes - 1)) * heightMM - heightMM / 2;
-  const zTopAt = (gx, gy) => (elevGrid[gy * gridRes + gx] - minElev) * zScale;
-  const zBase = -opts.baseThicknessMM;
+  // Z=0 sits at the base's underside (the conventional origin for printable meshes) so
+  // slicer features that key off raw mesh height - like Bambu Studio's height-range
+  // filament changes - line up correctly regardless of whether they normalize Z or not.
+  const zTopAt = (gx, gy) => opts.baseThicknessMM + (elevGrid[gy * gridRes + gx] - minElev) * zScale;
+  const zBase = 0;
 
   const positions = [];
   const colors = colorBands ? [] : null;
@@ -657,8 +660,104 @@ function exportResults(cells) {
   }
 }
 
+// ---------- 3MF export (Bambu Studio project format: bakes elevation color bands in
+// as height-range filament changes, so AMS multi-color printing needs no manual setup).
+// Format reverse-engineered from BambuStudio's own open-source 3MF reader/writer
+// (src/libslic3r/Format/bbs_3mf.cpp) rather than guessed, since it's undocumented.
+function build3mfModelXml(geometry) {
+  const pos = geometry.attributes.position.array;
+  const idx = geometry.index.array;
+  const vLines = [];
+  for (let i = 0; i < pos.length; i += 3) {
+    vLines.push(`     <vertex x="${pos[i]}" y="${pos[i + 1]}" z="${pos[i + 2]}"/>`);
+  }
+  const tLines = [];
+  for (let i = 0; i < idx.length; i += 3) {
+    tLines.push(`     <triangle v1="${idx[i]}" v2="${idx[i + 1]}" v3="${idx[i + 2]}"/>`);
+  }
+  return (
+    `<?xml version="1.0" encoding="UTF-8"?>\n` +
+    `<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:BambuStudio="http://schemas.bambulab.com/package/2021">\n` +
+    ` <metadata name="Application">BambuStudio-01.09.00.50</metadata>\n` +
+    ` <metadata name="BambuStudio:3mfVersion">1</metadata>\n` +
+    ` <resources>\n` +
+    `  <object id="1" type="model">\n` +
+    `   <mesh>\n` +
+    `    <vertices>\n${vLines.join("\n")}\n    </vertices>\n` +
+    `    <triangles>\n${tLines.join("\n")}\n    </triangles>\n` +
+    `   </mesh>\n` +
+    `  </object>\n` +
+    ` </resources>\n` +
+    ` <build>\n` +
+    `  <item objectid="1" transform="1 0 0 0 1 0 0 0 1 0 0 0" printable="1"/>\n` +
+    ` </build>\n` +
+    `</model>\n`
+  );
+}
+
+const MF_CONTENT_TYPES_XML =
+  `<?xml version="1.0" encoding="UTF-8"?>\n` +
+  `<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">\n` +
+  ` <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>\n` +
+  ` <Default Extension="model" ContentType="application/vnd.ms-package.3dmanufacturing-3dmodel+xml"/>\n` +
+  `</Types>`;
+
+const MF_ROOT_RELS_XML =
+  `<?xml version="1.0" encoding="UTF-8"?>\n` +
+  `<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">\n` +
+  ` <Relationship Target="/3D/3dmodel.model" Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n` +
+  `</Relationships>`;
+
+// heightsMm: [z0,z1,z2,z3,zTop] boundaries -> 4 ranges, each assigned AMS/extruder slot 1-4.
+function buildLayerConfigRangesXml(heightsMm) {
+  let ranges = "";
+  for (let i = 0; i < 4; i++) {
+    ranges += `<range min_z="${heightsMm[i]}" max_z="${heightsMm[i + 1]}">\n<option opt_key="extruder">${i + 1}</option>\n</range>\n`;
+  }
+  return `<?xml version="1.0"?>\n<objects>\n<object id="1">\n${ranges}</object>\n</objects>\n`;
+}
+
+// Converts our elevation color-band cutoffs (meters) into printed-mm height boundaries,
+// clamped to stay monotonically increasing regardless of input order.
+function computeBandHeightsMm(colorBands, globalMin, baseThicknessMM, zScale) {
+  const toMm = (elevM) => baseThicknessMM + (elevM - globalMin) * zScale;
+  const z0 = 0;
+  const z1 = Math.max(z0, toMm(colorBands[0].max));
+  const z2 = Math.max(z1, toMm(colorBands[1].max));
+  const z3 = Math.max(z2, toMm(colorBands[2].max));
+  const zTop = z3 + 100000; // safely covers every point above the last threshold
+  return [z0, z1, z2, z3, zTop];
+}
+
+function build3mfBytes(geometry, heightsMm) {
+  const encoder = new TextEncoder();
+  const files = [
+    { name: "[Content_Types].xml", data: encoder.encode(MF_CONTENT_TYPES_XML) },
+    { name: "_rels/.rels", data: encoder.encode(MF_ROOT_RELS_XML) },
+    { name: "3D/3dmodel.model", data: encoder.encode(build3mfModelXml(geometry)) },
+    { name: "Metadata/layer_config_ranges.xml", data: encoder.encode(buildLayerConfigRangesXml(heightsMm)) },
+  ];
+  return buildZip(files);
+}
+
+function export3MF(cells, genParams) {
+  const heightsMm = computeBandHeightsMm(genParams.colorBands, genParams.globalMin, genParams.baseThicknessMM, genParams.zScale);
+  const files = cells.map((cell) => {
+    const data = build3mfBytes(cell.geometry, heightsMm);
+    const name = cells.length === 1 ? "terrain.3mf" : `tile_row${cell.row + 1}_col${cell.col + 1}.3mf`;
+    return { name, data };
+  });
+
+  if (files.length === 1) {
+    downloadBlob(new Blob([files[0].data], { type: "model/3mf" }), files[0].name);
+  } else {
+    downloadBlob(new Blob([buildZip(files)], { type: "application/zip" }), "terrain_tiles_3mf.zip");
+  }
+}
+
 // ---------- main pipeline ----------
 let lastGeneratedCells = null;
+let lastGeneratedParams = null;
 
 async function generateModel() {
   if (!currentGrid || currentGrid.cells.length === 0) return;
@@ -803,14 +902,19 @@ async function generateModel() {
     currentMeshGroup = group;
     fitCameraToMesh(group, debugRaiseLakes || topDownView);
     lastGeneratedCells = cells;
+    lastGeneratedParams = {
+      colorBands,
+      globalMin,
+      baseThicknessMM,
+      zScale: (modelWidthMM / tileSizeM) * exaggeration,
+    };
 
     let triCount = 0;
     for (const cell of cells) triCount += cell.geometry.index.count / 3;
     log(`Done. ${cells.length} tile(s), ${triCount.toLocaleString()} total triangles. Ready to download.`);
 
-    const downloadBtn = document.getElementById("downloadBtn");
-    downloadBtn.disabled = false;
-    downloadBtn.textContent = cells.length > 1 ? `Download ZIP (${cells.length} tiles)` : "Download STL";
+    document.getElementById("downloadBtn").disabled = false;
+    updateDownloadButtonLabel();
   } catch (err) {
     console.error(err);
     log(`Error: ${err.message}`);
@@ -819,9 +923,31 @@ async function generateModel() {
   }
 }
 
+function updateDownloadButtonLabel() {
+  const downloadBtn = document.getElementById("downloadBtn");
+  if (downloadBtn.disabled) return;
+  const format = document.querySelector('input[name="exportFormat"]:checked').value;
+  const n = lastGeneratedCells ? lastGeneratedCells.length : 1;
+  const ext = format === "3mf" ? "3MF" : "STL";
+  downloadBtn.textContent = n > 1 ? `Download ZIP (${n} ${ext} tiles)` : `Download ${ext}`;
+}
+for (const radio of document.querySelectorAll('input[name="exportFormat"]')) {
+  radio.addEventListener("change", updateDownloadButtonLabel);
+}
+
 generateBtn.addEventListener("click", generateModel);
 document.getElementById("downloadBtn").addEventListener("click", () => {
-  if (lastGeneratedCells) exportResults(lastGeneratedCells);
+  if (!lastGeneratedCells) return;
+  const format = document.querySelector('input[name="exportFormat"]:checked').value;
+  if (format === "3mf") {
+    if (!lastGeneratedParams.colorBands) {
+      log('3MF export needs "Color preview by elevation" turned on before generating — check that box and click Generate again.');
+      return;
+    }
+    export3MF(lastGeneratedCells, lastGeneratedParams);
+  } else {
+    exportResults(lastGeneratedCells);
+  }
 });
 
 log("Ready. Click the map to set the top-left corner of your area.");

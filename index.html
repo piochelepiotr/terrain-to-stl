@@ -123,6 +123,19 @@
       <p class="hint" id="elevSourceHint">USGS 3DEP covers the continental US and ships already hydro-flattened at the source — real lakes and rivers are already flat before the "Flatten lakes" step even runs. Outside the US, switch to AWS or Mapbox.</p>
     </section>
 
+    <section>
+      <h2>Export format</h2>
+      <label class="checkbox-row">
+        <input type="radio" name="exportFormat" id="fmtStl" value="stl" checked>
+        STL (plain geometry, no color)
+      </label>
+      <label class="checkbox-row">
+        <input type="radio" name="exportFormat" id="fmt3mf" value="3mf">
+        3MF (Bambu Studio, pre-colored by elevation)
+      </label>
+      <p class="hint">3MF bakes your elevation color bands in as Bambu Studio height-range filament changes (one per band), so AMS multi-color printing works without manually setting up height ranges yourself. Requires "Color preview by elevation" above to be on. Load the matching filament color into each AMS slot 1-4 to get these colors physically.</p>
+    </section>
+
     <button id="generateBtn" disabled>Generate model</button>
     <button id="downloadBtn" disabled>Download STL</button>
     <p class="hint" id="tileCountHint"></p>
