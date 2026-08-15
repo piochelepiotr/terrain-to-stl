@@ -113,7 +113,7 @@
         "0",
         "0"
     ],
-    "enable_prime_tower": "1",
+    "enable_prime_tower": "0",
     "enable_support": "0",
     "end_print_exhaust_fan_speed": [
         "60",
