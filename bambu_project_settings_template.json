@@ -337,7 +337,7 @@
         "0",
         "0"
     ],
-    "flush_into_infill": "0",
+    "flush_into_infill": "1",
     "flush_into_objects": "1",
     "flush_into_support": "1",
     "flush_multiplier": "1",
@@ -552,8 +552,8 @@
         "0.02",
         "0.02"
     ],
-    "prime_tower_brim_width": "3",
-    "prime_tower_width": "20",
+    "prime_tower_brim_width": "0",
+    "prime_tower_width": "2",
     "prime_volume": "45",
     "print_compatible_printers": [
         "Bambu Lab P2S 0.4 nozzle"

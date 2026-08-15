@@ -822,20 +822,23 @@ function bedPlacementTransform(widthMM) {
 // BambuStudio's own normalize_fdm_2() (PrintConfig.cpp) force re-enables the tower
 // whenever more than one filament is used with by-layer printing (our case) -
 // enable_prime_tower:"0" gets silently overridden back to on when the file loads, so
-// positioning it correctly, not disabling it, is the only real fix. We compute a corridor
-// to the right of the model, running its full bed-Y extent, sized to comfortably fit the
-// tower regardless of its purge-volume-driven depth. Falls back to a fixed near-origin
-// corner (still clear of the model) if the model is wide enough to leave no real margin -
-// a genuine bed-space constraint no placement choice can fully solve.
-const PRIME_TOWER_CORRIDOR_MM = 50;
+// positioning it correctly, not disabling it, is the only real fix. prime_tower_width and
+// prime_tower_brim_width are set to Bambu's own documented minimums (2mm / 0mm) in the
+// template to shrink its footprint as much as possible. We compute a corridor to the right
+// of the model, sized to fit that minimal tower. If the model leaves no real margin at all
+// (e.g. very large tiles), we still place the tower just past the model's own right edge
+// rather than falling back to a fixed corner, which would now land inside the model itself
+// since the model is left-aligned against that same edge - best effort at that point, a
+// genuine bed-space constraint no placement choice can fully solve.
+const PRIME_TOWER_CORRIDOR_MM = 8;
 function wipeTowerXY(widthMM) {
   const { x } = bedPlacementXY(widthMM);
   const objXMax = x + widthMM / 2;
   const corridor = BED_SIZE_MM - objXMax;
   if (corridor >= PRIME_TOWER_CORRIDOR_MM) {
-    return { x: objXMax + corridor / 2 - PRIME_TOWER_CORRIDOR_MM / 4, y: BED_EDGE_MARGIN_MM + 10 };
+    return { x: objXMax + corridor / 2, y: BED_EDGE_MARGIN_MM + 10 };
   }
-  return { x: BED_EDGE_MARGIN_MM, y: BED_EDGE_MARGIN_MM + 10 };
+  return { x: objXMax + corridor / 2, y: BED_EDGE_MARGIN_MM + 10 };
 }
 function build3mfModelXml(objects, widthMM) {
   let resources = "";
