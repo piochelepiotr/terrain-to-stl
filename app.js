@@ -179,10 +179,6 @@ function fitCameraToMesh(mesh, topDown = false) {
   controls.update();
 }
 
-document.getElementById("topDownView").addEventListener("change", (e) => {
-  if (currentMeshGroup) fitCameraToMesh(currentMeshGroup, e.target.checked || document.getElementById("debugRaiseLakes").checked);
-});
-
 function animate() {
   requestAnimationFrame(animate);
   controls.update();
@@ -206,6 +202,40 @@ window.addEventListener("resize", () => {
   camera.aspect = previewEl.clientWidth / previewEl.clientHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(previewEl.clientWidth, previewEl.clientHeight);
+});
+
+// ---------- draggable map/preview splitter ----------
+// Pins the map to a dragged pixel height (flex: 0 0 <px>) and lets the preview fill
+// whatever's left (flex: 1 1 auto) - the ResizeObservers above already fire on any size
+// change to either element, so no extra invalidateSize()/setSize() calls are needed here.
+const mapDiv = document.getElementById("map");
+const splitterEl = document.getElementById("mapPreviewSplitter");
+let splitterDragging = false;
+
+splitterEl.addEventListener("mousedown", (e) => {
+  splitterDragging = true;
+  splitterEl.classList.add("dragging");
+  document.body.style.userSelect = "none";
+  e.preventDefault();
+});
+
+window.addEventListener("mousemove", (e) => {
+  if (!splitterDragging) return;
+  const mainRect = document.getElementById("main").getBoundingClientRect();
+  const splitterHeight = splitterEl.getBoundingClientRect().height;
+  const minHeight = 150;
+  const available = mainRect.height - splitterHeight;
+  let mapHeight = e.clientY - mainRect.top;
+  mapHeight = Math.max(minHeight, Math.min(mapHeight, available - minHeight));
+  mapDiv.style.flex = `0 0 ${mapHeight}px`;
+  previewEl.style.flex = "1 1 auto";
+});
+
+window.addEventListener("mouseup", () => {
+  if (!splitterDragging) return;
+  splitterDragging = false;
+  splitterEl.classList.remove("dragging");
+  document.body.style.userSelect = "";
 });
 
 // ---------- tile math ----------
@@ -772,16 +802,14 @@ function exportResults(cells) {
 // volumes is the structurally correct fix, not just a warning suppression.
 const WRAPPER_OBJECT_ID = 100;
 const BED_SIZE_MM = 256;
-// Bambu's AMS-equipped printers (P1S/P2S/X1/X1C/H2 series) all carve an exclusion zone
-// out of the front-left of the bed for the AMS feed/lidar hardware. The exact shape varies
-// by model - the largest known one (P2S) is a 28x28mm corner block plus an 8mm-wide strip
-// running the full left edge - so clearing x >= 30mm is enough to stay outside all of them
-// without needing to special-case per-printer geometry.
-const BED_EXCLUDE_MARGIN_MM = 30;
 const BED_EDGE_MARGIN_MM = 2;
+// The Bambu Lab P2S's own machine profile (Bambu Lab P2S 0.4 nozzle.json, fetched from
+// BambuStudio's repo) explicitly overrides bed_exclude_area to an empty array - unlike
+// X1 Carbon, P2S has no AMS-hardware cutout to dodge. So the model just needs basic edge
+// clearance; it's left-aligned (rather than centered) purely to concentrate all of the
+// bed's remaining width into one corridor on the right, for the prime tower (see below).
 function bedPlacementXY(widthMM) {
-  const maxX = BED_SIZE_MM - BED_EDGE_MARGIN_MM - widthMM / 2;
-  const x = Math.min(BED_EXCLUDE_MARGIN_MM + widthMM / 2, maxX);
+  const x = Math.min(BED_EDGE_MARGIN_MM + widthMM / 2, BED_SIZE_MM - BED_EDGE_MARGIN_MM - widthMM / 2);
   const y = BED_SIZE_MM / 2;
   return { x, y };
 }
@@ -790,16 +818,15 @@ function bedPlacementTransform(widthMM) {
   return `${x} ${y} 0`;
 }
 
-// Bambu's prime/wipe tower needs its own clear patch of bed, separate from the model and
-// the AMS exclusion zone. BambuStudio's own normalize_fdm_2() (PrintConfig.cpp) force
-// re-enables the tower whenever more than one filament is used with by-layer printing
-// (our case) - enable_prime_tower:"0" gets silently overridden back to on when the file
-// loads, so positioning it correctly, not disabling it, is the only real fix. We compute a
-// corridor to the right of the model, running its full bed-Y extent, sized to comfortably
-// fit the tower regardless of its purge-volume-driven depth. Falls back to a fixed
-// near-origin corner (still clear of the model, though possibly tight against the exclusion
-// zone) if the model is wide enough to leave no real margin - a genuine bed-space
-// constraint no placement choice can fully solve.
+// Bambu's prime/wipe tower needs its own clear patch of bed, separate from the model.
+// BambuStudio's own normalize_fdm_2() (PrintConfig.cpp) force re-enables the tower
+// whenever more than one filament is used with by-layer printing (our case) -
+// enable_prime_tower:"0" gets silently overridden back to on when the file loads, so
+// positioning it correctly, not disabling it, is the only real fix. We compute a corridor
+// to the right of the model, running its full bed-Y extent, sized to comfortably fit the
+// tower regardless of its purge-volume-driven depth. Falls back to a fixed near-origin
+// corner (still clear of the model) if the model is wide enough to leave no real margin -
+// a genuine bed-space constraint no placement choice can fully solve.
 const PRIME_TOWER_CORRIDOR_MM = 50;
 function wipeTowerXY(widthMM) {
   const { x } = bedPlacementXY(widthMM);
@@ -808,7 +835,7 @@ function wipeTowerXY(widthMM) {
   if (corridor >= PRIME_TOWER_CORRIDOR_MM) {
     return { x: objXMax + corridor / 2 - PRIME_TOWER_CORRIDOR_MM / 4, y: BED_EDGE_MARGIN_MM + 10 };
   }
-  return { x: BED_EXCLUDE_MARGIN_MM, y: BED_EDGE_MARGIN_MM + 10 };
+  return { x: BED_EDGE_MARGIN_MM, y: BED_EDGE_MARGIN_MM + 10 };
 }
 function build3mfModelXml(objects, widthMM) {
   let resources = "";
@@ -970,7 +997,6 @@ async function generateModel() {
   const baseThicknessMM = parseFloat(document.getElementById("baseThickness").value);
   const flattenLakes = document.getElementById("flattenLakes").checked;
   const debugRaiseLakes = document.getElementById("debugRaiseLakes").checked;
-  const topDownView = document.getElementById("topDownView").checked;
   const mapboxToken = document.getElementById("mapboxToken").value.trim();
   const elevSource = document.querySelector('input[name="elevSource"]:checked').value;
   const colorByElevation = document.getElementById("colorByElevation").checked;
@@ -1099,7 +1125,7 @@ async function generateModel() {
 
     scene.add(group);
     currentMeshGroup = group;
-    fitCameraToMesh(group, debugRaiseLakes || topDownView);
+    fitCameraToMesh(group, debugRaiseLakes);
     lastGeneratedCells = cells;
     lastGeneratedParams = {
       colorBands,

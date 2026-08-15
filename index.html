@@ -57,19 +57,14 @@
       </label>
       <label class="number-row">
         Tile size (mm per square)
-        <input id="modelSize" type="number" min="30" max="300" value="170">
+        <input id="modelSize" type="number" min="30" max="300" value="200">
       </label>
+      <p class="hint" id="tileSizeHint">3MF export needs room beside the model for the multi-color prime/wipe tower (Bambu Studio always requires one when a print uses more than one filament, so it can't just be turned off). Tiles up to ~204mm leave enough margin on a 256x256mm P2S bed; above that, Bambu Studio may warn about a prime-tower collision since there's no clear space left to place it.</p>
       <p class="hint" id="tileSizeHint">3MF export needs room beside the model for both the AMS exclusion zone at the front-left of the plate and the multi-color prime/wipe tower (Bambu Studio always requires one when a print uses more than one filament, so it can't just be turned off). Tiles up to ~176mm leave enough margin for both on a 256x256mm bed (P1S/P2S/X1/X1C); above that, Bambu Studio may warn about exclusion-zone or prime-tower collisions since there's no clear space left to place them.</p>
       <label class="number-row">
         Base thickness (mm, minimum)
         <input id="baseThickness" type="number" min="1" max="15" value="3">
       </label>
-      <p class="hint">With a multi-tile grid, this is the base thickness of the tile containing the lowest point in the whole grid. Every other tile gets a thicker base so all tiles' bottoms sit on the same physical plane when assembled — a tile that's entirely up a mountain gets a proportionally thicker base.</p>
-      <label class="checkbox-row">
-        <input type="checkbox" id="topDownView">
-        Top-down preview
-      </label>
-      <p class="hint">Views the model from nearly overhead instead of the default angle — useful for checking whether flat areas (lakes, plateaus) actually look flat, since the default angled view can hide small flat patches next to tall peaks.</p>
     </section>
 
     <section>
@@ -78,7 +73,6 @@
         <input type="checkbox" id="colorByElevation" checked>
         Color preview by elevation
       </label>
-      <p class="hint">Preview-only: colors each point of the 3D preview by which elevation band it falls in. STL files have no standard way to store color, so exported files are still plain (uncolored) geometry regardless of this setting.</p>
       <div class="color-band-row">
         <input type="color" id="colorBand1" value="#1a4d2e">
         <span>up to</span>
@@ -149,6 +143,7 @@
 
   <main id="main">
     <div id="map"></div>
+    <div id="mapPreviewSplitter"></div>
     <div id="preview"></div>
   </main>
 </div>
